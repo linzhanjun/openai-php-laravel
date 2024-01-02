@@ -17,6 +17,7 @@ use OpenAI\Laravel\Exceptions\ApiKeyIsMissing;
  */
 final class ServiceProvider extends BaseServiceProvider implements DeferrableProvider
 {
+    const OPEN_AI = 'open_ai';
     const AZURE_OPEN_AI = 'azure_open_ai';
 
     /**
@@ -25,16 +26,17 @@ final class ServiceProvider extends BaseServiceProvider implements DeferrablePro
     public function register(): void
     {
         $this->app->singleton(ClientContract::class, static function () {
-
-            $apiKey = config('openai.open_ai.api_key');
-            $organization = config('openai.open_ai.organization');
-
             $config = config('openai');
-            $default = $config['default'] ?? '';
+            $config = self::getConfig($config['default'] ?? '');
+            if (!$config) {
+                throw ApiKeyIsMissing::create();
+            }
+            $apiKey = $config['api_key'] ?? '';
+            $organization = $config['organization'] ?? null;
 
             // Azure OpenAI
-            if (isset($config[$default]) && $default == self::AZURE_OPEN_AI) {
-                return AzureOpenai::instance($config[$default]);
+            if ($config['driver'] == self::AZURE_OPEN_AI) {
+                return AzureOpenai::instance($config);
             }
 
             if (! is_string($apiKey) || ($organization !== null && ! is_string($organization))) {
@@ -52,6 +54,52 @@ final class ServiceProvider extends BaseServiceProvider implements DeferrablePro
 
         $this->app->alias(ClientContract::class, 'openai');
         $this->app->alias(ClientContract::class, Client::class);
+    }
+
+    /**
+     * @description get default config
+     * @param $default
+     * @return array|mixed|string
+     */
+    protected static function getConfig($default = '')
+    {
+        $config = config('openai');
+        if (isset($config['polling']) && $config['polling']) {
+            $driver_config = [];
+            foreach ($config as $key => $value) {
+                if (isset($value['driver']) && $default == $value['driver']) {
+                    $driver_config[] = $value;
+                }
+            }
+            return self::polling($driver_config);
+        }
+        return $config[$default] ?? '';
+    }
+
+    /**
+     * @description polling configs
+     * @param $config
+     * @return array
+     */
+    protected static function polling($config)
+    {
+        $current_config = [];
+        //拆分token轮询;
+        if (count($config) > 1) {
+            $path = storage_path('app/openai_token/' . md5(json_encode($config)));
+
+            try {
+                $token_number = file_get_contents($path);
+            } catch (\Exception $e) {
+                $token_number = 0;
+            }
+            //根据$token_number切换数组
+            file_put_contents($path, ($token_number + 1));
+            $current = $token_number % count($config);
+            $current_config = $config[$current] ?? $config[0];
+        }
+
+        return $current_config;
     }
 
     /**
